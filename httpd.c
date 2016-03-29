@@ -72,6 +72,7 @@ void echo_html(int client,const char* path, unsigned int file_size)
 }
 int get_line(int sock,char* buf, int max_len)
 {
+	printf("enter get_line !\n");
 	if(!buf || max_len < 0)
 	{
 		return -1;
@@ -82,10 +83,13 @@ int get_line(int sock,char* buf, int max_len)
 	while(i<max_len-1 && c !='\n')
 	{
 		n = recv(sock,&c,1,0);
+		
 		if( n > 0)//success
 		{
+			printf("recv success !, n>0\n");
 			if(c == '\r')
 			{
+				printf("recv success !, n>0 c ==r !\n");
 				n = recv(sock,&c,1,MSG_PEEK);//MSG_PEEK receive '\r'each time
 				if( n>0 && c == '\n')//'\r\n'
 				{
@@ -102,6 +106,7 @@ int get_line(int sock,char* buf, int max_len)
 		}
 	}
 	buf[i] = '\0';
+	printf("buf : >  %s\n",buf);
 	return i;
 }
 void exe_cgi(int sock_client,const char* path,const char* method,const char*query_string)
@@ -238,12 +243,14 @@ void exe_cgi(int sock_client,const char* path,const char* method,const char*quer
 		printf("after waitpid ... id :> %d\n",getpid());
 	}
 }
-void *accept_request(void *arg)
+void *accept_request(void  *arg)
 {
-	
-	pthread_detach(pthread_self());//detach self with main thread
+	printf("enter accept_request!\n");	
+//	pthread_detach(pthread_self());//detach self with main thread
 
-	int sock_client = (int)arg;//???
+	struct pollfd* arg1 =(struct pollfd*)arg;//???
+	int sock_client =arg1->fd;//???
+	printf("pool socket : %d\n", sock_client);
 //	echo_error_to_client(sock_client,404);
 	int cgi = 0;
 	char method[_COMM_SIZE];
@@ -276,19 +283,24 @@ void *accept_request(void *arg)
 		url[i] = buffer[j];
 		i++,j++;
 	}
+	printf("before strcasecmp !\n");
+	printf("method is :  %s\n",method);
 	if(strcasecmp(method,"GET") && strcasecmp(method,"POST"))
 	{
 		echo_error_to_client(sock_client,502);
 		return NULL;
 	}
+	printf("after strcasecmp !\n");
 	if(strcasecmp(method,"POST") == 0)
 	{
 		cgi = 1;//??????
 		printf("method is post\n");
 	}
-
+	
+	printf("before get!\n");	
 	if(strcasecmp(method,"GET") == 0)
 	{
+		printf("enter get >> !\n");
 		query_string = url;
 		while(*query_string != '?' && *query_string != '\0')
 		{
@@ -373,6 +385,70 @@ int start(int port)
 	}
 	return listen_sock;
 }
+static void init_pollfd(struct pollfd *poll_set,int sock)
+{
+	poll_set[0].fd = sock;
+	poll_set[0].events = POLLIN;
+	poll_set[0].revents = 0;
+	int i = 1;
+	for(; i<_COMM_SIZE;i++)
+	{
+		poll_set[i].fd = _DEF_VAL_;
+		poll_set[i].events = POLLIN;
+//		poll_set[i].revents = 0;
+	}
+}
+static int add_new_fd(struct pollfd *poll_set,int new_sock)
+{
+	int i =1;
+	for(;i<_COMM_SIZE;i++)
+	{
+		if(poll_set[i].fd == _DEF_VAL_)
+		{
+			poll_set[i].fd = new_sock;
+			poll_set[i].events = POLLIN;
+			return 0;
+		}
+	}
+	return 1;
+}
+static int delete_fd(struct pollfd *poll_set,int fd)
+{
+	int i =1;
+	for(;i<_COMM_SIZE;i++)
+	{
+		int cur_fd = poll_set[i].fd;
+		if(cur_fd == fd)
+		{
+			poll_set[i].fd = _DEF_VAL_;
+			return 0;
+		}
+	}
+	return 1;
+}
+static int read_data(int new_fd)
+{
+	char buf[1024];
+	ssize_t sz = 0;
+	int total = 0;
+	while((sz = read(new_fd,buf+total,64))>0)
+	{
+		total+=sz;
+	}
+	if(sz == 0)
+	{
+		buf[total] = '\0';
+		printf("client data : %s\n",buf);
+		return 0;//read end
+	}else if(sz < 0)
+	{
+		perror("read");
+		return -1;
+	}else
+	{//do nothing
+	}
+	return new_fd;
+}
 int main(int argc,char *argv[])
 {
 	if(argc != 2)
@@ -385,16 +461,59 @@ int main(int argc,char *argv[])
 	int sock = start(port);
 	struct sockaddr_in client;
 	socklen_t len = 0;
+	int timeout = 3000;
+	struct pollfd poll_set[_COMM_SIZE];
+	init_pollfd(poll_set,sock);
 	while(1)
 	{
-		int new_sock = accept(sock,(struct sockaddr*)&client,&len);
-		if(new_sock<0)
+		switch(poll(poll_set,_COMM_SIZE,timeout))
 		{
-			print_log(__FUNCTION__,__LINE__,errno,strerror(errno));
-			continue;
+			case -1:
+				printf("poll error !\n");
+				exit(1);
+				break;
+			case 0:
+				printf("timeout !\n");
+				break;
+			default:
+				{	
+					int i = 0;
+					for(; i<_COMM_SIZE;i++)
+					{
+						if(i== 0 && poll_set[i].revents | POLLIN)
+						{
+							printf("poll_set.revents | POLLIN\n");
+							int new_sock = accept(sock,(struct sockaddr*)&client,&len);
+							if(new_sock<0)
+							{
+								print_log(__FUNCTION__,__LINE__,errno,strerror(errno));
+								continue;
+							}
+							else
+							{
+								printf("accept success!\n");
+								if((add_new_fd(poll_set,new_sock)) == 0)			
+								{
+									printf("add_new_fd access!\n");
+								}else
+									close(sock);
+							}
+							continue;
+						}
+						else if(poll_set[i].fd != _DEF_VAL_ && (poll_set[i].revents | POLLIN))
+						{
+							printf("poll_set revents!\n");
+							//read_data(poll_set[i].fd);
+							accept_request(&poll_set[i]);
+	//						delete_fd(poll_set,poll_set[i].fd);
+	//						close(poll_set[i].fd);
+						}
+					}
+				}
+				break;
 		}
-		pthread_t new_thread;
-		pthread_create(&new_thread,NULL,accept_request,(void*)new_sock); 
+//		pthread_t new_thread;
+//		pthread_create(&new_thread,NULL,accept_request,(void*)new_sock); 
 	}
 	return 0;
 }
